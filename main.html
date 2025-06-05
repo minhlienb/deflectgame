@@ -34,7 +34,8 @@
     <div id="gameStatus">Connecting to server...</div>
     <script>
         // Multiplayer setup
-        const socket = new WebSocket('ws://localhost:8080');
+        // const socket = new WebSocket('ws://localhost:8080');
+        const socket = new WebSocket('ws://localhost:3000');
         let playerId = null;
         let otherPlayers = new Map();
         let connectionStatus = 'connecting';
