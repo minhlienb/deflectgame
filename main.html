@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Platformer Game</title>
+    <title>Multiplayer Platformer Game</title>
     <style>
         canvas {
             border: 1px solid black;
@@ -13,16 +13,115 @@
         body {
             margin: 0;
             display: flex;
+            flex-direction: column;
             justify-content: center;
             align-items: center;
             min-height: 100vh;
             background-color: #919191;
         }
+        #gameStatus {
+            color: white;
+            font-family: Arial, sans-serif;
+            margin-top: 10px;
+            padding: 5px 10px;
+            background-color: rgba(0,0,0,0.5);
+            border-radius: 5px;
+        }
     </style>
 </head>
 <body>
     <canvas id="gameCanvas"></canvas>
+    <div id="gameStatus">Connecting to server...</div>
     <script>
+        // Multiplayer setup
+        const socket = new WebSocket('ws://localhost:8080');
+        let playerId = null;
+        let otherPlayers = new Map();
+        let connectionStatus = 'connecting';
+
+        // Connection event handlers
+        socket.onopen = () => {
+            connectionStatus = 'connected';
+            document.getElementById('gameStatus').textContent = 'Connected to server';
+        };
+
+        socket.onclose = () => {
+            connectionStatus = 'disconnected';
+            document.getElementById('gameStatus').textContent = 'Disconnected from server';
+        };
+
+        socket.onerror = (error) => {
+            connectionStatus = 'error';
+            document.getElementById('gameStatus').textContent = 'Connection error';
+            console.error('WebSocket error:', error);
+        };
+
+        // Send player state to server
+        function sendPlayerState() {
+            if (socket.readyState !== WebSocket.OPEN || !player) return;
+            
+            const state = {
+                x: player.x,
+                y: player.y,
+                velocityX: player.velocityX,
+                velocityY: player.velocityY,
+                facingRight: player.facingRight,
+                isAttacking: player.isAttacking,
+                isDeflecting: player.isDeflecting,
+                isJumping: player.isJumping,
+                health: player.health,
+                currentAnimation: player.currentAnimation,
+                frameIndex: player.frameIndex
+            };
+            socket.send(JSON.stringify({ type: 'playerState', state }));
+        }
+
+        // Handle incoming messages
+        socket.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+
+            // Initialize player with ID from server
+            if (data.type === 'init') {
+                playerId = data.playerId;
+                document.getElementById('gameStatus').textContent = `You are Player ${playerId}`;
+            }
+            // Handle other player's state updates
+            else if (data.type === 'playerState') {
+                const otherPlayerId = data.playerId;
+                
+                // Create new player if doesn't exist
+                if (!otherPlayers.has(otherPlayerId)) {
+                    const newPlayer = new Player(canvas.width/2, canvas.height/2);
+                    otherPlayers.set(otherPlayerId, newPlayer);
+                }
+                
+                // Update other player's state
+                const otherPlayer = otherPlayers.get(otherPlayerId);
+                const state = data.state;
+                
+                otherPlayer.x = state.x;
+                otherPlayer.y = state.y;
+                otherPlayer.velocityX = state.velocityX;
+                otherPlayer.velocityY = state.velocityY;
+                otherPlayer.facingRight = state.facingRight;
+                otherPlayer.isAttacking = state.isAttacking;
+                otherPlayer.isDeflecting = state.isDeflecting;
+                otherPlayer.isJumping = state.isJumping;
+                otherPlayer.health = state.health;
+                otherPlayer.currentAnimation = state.currentAnimation;
+                otherPlayer.frameIndex = state.frameIndex;
+            }
+            // Handle player disconnection
+            else if (data.type === 'playerDisconnect') {
+                otherPlayers.delete(data.playerId);
+            }
+        };
+
+        // Send player state periodically
+        setInterval(sendPlayerState, 50);
+
+
+
         const canvas = document.getElementById('gameCanvas');
         const ctx = canvas.getContext('2d');
 
@@ -457,8 +556,7 @@
 
         // Game state
         const player = new Player(canvas.width/4, canvas.height/2);
-        const player2 = new Enemy(3*canvas.width/4, canvas.height/2); // Second player for multiplayer
-        const enemies = [player2]; // Add player2 to enemies array for collision detection
+        const enemies = []; // Will store other players
         const keys = {};
 
         // Check collision between two rectangles
@@ -511,63 +609,85 @@
 
             // Update player
             player.update();
-
-            // Update player2 (second player)
-            player2.update();
-
-            // Check for player attack collision with player2
-            if (player.isAttacking) {
-                const attackBox = player.facingRight ? 
-                    {
-                        x: player.x + player.width,
-                        y: player.y + 20,
-                        width: 30,
-                        height: 20
-                    } : 
-                    {
-                        x: player.x - 30,
-                        y: player.y + 20,
-                        width: 30,
-                        height: 20
-                    };
+            
+            // Update all other players
+            otherPlayers.forEach(otherPlayer => {
+                otherPlayer.update();
                 
-                if (checkCollision(attackBox, player2) && !player2.isDead) {
-                    player2.takeDamage(25); // 25 damage per hit
+                // Check for player attack collision with other players
+                if (player.isAttacking) {
+                    const attackBox = player.facingRight ? 
+                        {
+                            x: player.x + player.width,
+                            y: player.y + 20,
+                            width: 30,
+                            height: 20
+                        } : 
+                        {
+                            x: player.x - 30,
+                            y: player.y + 20,
+                            width: 30,
+                            height: 20
+                        };
+                    
+                    if (checkCollision(attackBox, otherPlayer) && !otherPlayer.isDead) {
+                        otherPlayer.takeDamage(25); // 25 damage per hit
+                    }
                 }
-            }
-
-            // Check for player2 attack collision with player
-            if (player2.isAttacking) {
-                const attackBox = player2.facingRight ? 
-                    {
-                        x: player2.x + player2.width,
-                        y: player2.y + 20,
-                        width: 30,
-                        height: 20
-                    } : 
-                    {
-                        x: player2.x - 30,
-                        y: player2.y + 20,
-                        width: 30,
-                        height: 20
-                    };
                 
-                if (checkCollision(attackBox, player) && !player.isDeflecting && !player.isDead) {
-                    player.takeDamage(10); // 10 damage per attack
+                // Check for other player attack collision with player
+                if (otherPlayer.isAttacking) {
+                    const attackBox = otherPlayer.facingRight ? 
+                        {
+                            x: otherPlayer.x + otherPlayer.width,
+                            y: otherPlayer.y + 20,
+                            width: 30,
+                            height: 20
+                        } : 
+                        {
+                            x: otherPlayer.x - 30,
+                            y: otherPlayer.y + 20,
+                            width: 30,
+                            height: 20
+                        };
+                    
+                    if (checkCollision(attackBox, player) && !player.isDeflecting && !player.isDead) {
+                        player.takeDamage(10); // 10 damage per attack
+                    }
                 }
-            }
-
-            // No damage from direct collision between players
+            });
 
             // Draw ground
             ctx.fillStyle = '#888';
             ctx.fillRect(0, canvas.height - PLATFORM_HEIGHT, canvas.width, PLATFORM_HEIGHT);
 
-            // Draw player2
-            player2.draw();
+            // Draw all other players
+            otherPlayers.forEach(otherPlayer => {
+                otherPlayer.draw();
+            });
 
             // Draw player
             player.draw();
+            
+            // Draw player IDs above characters
+            ctx.font = '14px Arial';
+            ctx.fillStyle = '#fff';
+            ctx.textAlign = 'center';
+            
+            // Draw player ID
+            if (playerId) {
+                ctx.fillText(`Player ${playerId}`, player.x + player.width/2, player.y - 15);
+            }
+            
+            // Draw other player IDs
+            otherPlayers.forEach((otherPlayer, id) => {
+                ctx.fillText(`Player ${id}`, otherPlayer.x + otherPlayer.width/2, otherPlayer.y - 15);
+            });
+            
+            // Draw connection status
+            ctx.textAlign = 'left';
+            ctx.fillStyle = connectionStatus === 'connected' ? '#0f0' : '#f00';
+            ctx.fillText(`Status: ${connectionStatus}`, 10, 50);
 
             // Draw controls info
             ctx.fillStyle = '#fff';
