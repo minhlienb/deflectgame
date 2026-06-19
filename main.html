@@ -42,63 +42,191 @@
         const canvas = document.getElementById('gameCanvas');
         const renderer = new WebGLRenderer(canvas);
 
+        const TICK_RATE = 128;
+        const TICK_INTERVAL_MS = 1000 / TICK_RATE;
+
         const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const socket = new WebSocket(`${wsProtocol}//${location.host}`);
         let playerId = null;
         let otherPlayers = new Map();
+        let peerConnections = new Map();
+        let dataChannels = new Map();
         let connectionStatus = 'connecting';
+        let tickCount = 0;
+        let lastFpsTime = performance.now();
+        let fps = 0;
+        let tickrate = 0;
+        let lastTickTime = performance.now();
+        let p2pMode = 'waiting';
+
+        const ICE_SERVERS = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+
+        function createPeerConnection(peerId) {
+            const pc = new RTCPeerConnection(ICE_SERVERS);
+            peerConnections.set(peerId, pc);
+
+            const dc = pc.createDataChannel('game', { ordered: false, maxRetransmits: 0 });
+            dc.binaryType = 'arraybuffer';
+            setupDataChannel(dc, peerId);
+
+            pc.onicecandidate = (event) => {
+                if (event.candidate && socket.readyState === WebSocket.OPEN) {
+                    socket.send(JSON.stringify({
+                        type: 'iceCandidate',
+                        targetId: peerId,
+                        candidate: event.candidate
+                    }));
+                }
+            };
+
+            pc.onconnectionstatechange = () => {
+                if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+                    cleanupPeer(peerId);
+                }
+            };
+
+            pc.ondatachannel = (event) => {
+                setupDataChannel(event.channel, peerId);
+            };
+
+            return pc;
+        }
+
+        function setupDataChannel(dc, peerId) {
+            dc.onopen = () => {
+                dataChannels.set(peerId, dc);
+                p2pMode = 'connected';
+                document.getElementById('gameStatus').textContent =
+                    `Player ${playerId} [P2P ${TICK_RATE}Hz]`;
+            };
+            dc.onclose = () => {
+                dataChannels.delete(peerId);
+                if (dataChannels.size === 0) p2pMode = 'waiting';
+            };
+            dc.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    handleRemoteState(data, peerId);
+                } catch (e) {}
+            };
+        }
+
+        async function createOffer(peerId) {
+            const pc = createPeerConnection(peerId);
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            socket.send(JSON.stringify({
+                type: 'offer',
+                targetId: peerId,
+                offer: pc.localDescription
+            }));
+        }
+
+        async function handleOffer(data) {
+            let pc = peerConnections.get(data.playerId);
+            if (!pc) pc = createPeerConnection(data.playerId);
+            await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            socket.send(JSON.stringify({
+                type: 'answer',
+                targetId: data.playerId,
+                answer: pc.localDescription
+            }));
+        }
+
+        async function handleAnswer(data) {
+            const pc = peerConnections.get(data.playerId);
+            if (pc) await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+        }
+
+        async function handleIceCandidate(data) {
+            const pc = peerConnections.get(data.playerId);
+            if (pc && data.candidate) {
+                await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+            }
+        }
+
+        function cleanupPeer(peerId) {
+            const dc = dataChannels.get(peerId);
+            if (dc) dc.close();
+            dataChannels.delete(peerId);
+            const pc = peerConnections.get(peerId);
+            if (pc) pc.close();
+            peerConnections.delete(peerId);
+            if (dataChannels.size === 0) p2pMode = 'waiting';
+        }
 
         socket.onopen = () => {
             connectionStatus = 'connected';
-            document.getElementById('gameStatus').textContent = 'Connected to server';
         };
         socket.onclose = () => {
             connectionStatus = 'disconnected';
+            p2pMode = 'disconnected';
             document.getElementById('gameStatus').textContent = 'Disconnected from server';
         };
         socket.onerror = () => {
             connectionStatus = 'error';
+            p2pMode = 'error';
             document.getElementById('gameStatus').textContent = 'Connection error';
         };
-
-        function sendPlayerState() {
-            if (socket.readyState !== WebSocket.OPEN || !player) return;
-            socket.send(JSON.stringify({
-                type: 'playerState',
-                state: {
-                    x: player.x, y: player.y,
-                    velocityX: player.velocityX, velocityY: player.velocityY,
-                    facingRight: player.facingRight,
-                    isAttacking: player.isAttacking, isDeflecting: player.isDeflecting,
-                    isJumping: player.isJumping, health: player.health,
-                    currentAnimation: player.currentAnimation, frameIndex: player.frameIndex
-                }
-            }));
-        }
 
         socket.onmessage = (event) => {
             const data = JSON.parse(event.data);
             if (data.type === 'init') {
                 playerId = data.playerId;
-                document.getElementById('gameStatus').textContent = `You are Player ${playerId}`;
-            } else if (data.type === 'playerState') {
-                if (!otherPlayers.has(data.playerId)) {
-                    otherPlayers.set(data.playerId, new Player(canvas.width / 2, canvas.height / 2));
-                }
-                const p = otherPlayers.get(data.playerId);
-                const s = data.state;
-                p.x = s.x; p.y = s.y;
-                p.velocityX = s.velocityX; p.velocityY = s.velocityY;
-                p.facingRight = s.facingRight;
-                p.isAttacking = s.isAttacking; p.isDeflecting = s.isDeflecting;
-                p.isJumping = s.isJumping; p.health = s.health;
-                p.currentAnimation = s.currentAnimation; p.frameIndex = s.frameIndex;
-            } else if (data.type === 'playerDisconnect') {
+                document.getElementById('gameStatus').textContent =
+                    `Player ${playerId} [P2P connecting...]`;
+            } else if (data.type === 'existingPeers') {
+                data.peers.forEach(peerId => createOffer(peerId));
+            } else if (data.type === 'peerJoined') {
+                document.getElementById('gameStatus').textContent =
+                    `Player ${playerId} [P2P handshake with ${data.playerId}...]`;
+            } else if (data.type === 'offer') {
+                handleOffer(data);
+            } else if (data.type === 'answer') {
+                handleAnswer(data);
+            } else if (data.type === 'iceCandidate') {
+                handleIceCandidate(data);
+            } else if (data.type === 'peerDisconnected') {
+                cleanupPeer(data.playerId);
                 otherPlayers.delete(data.playerId);
             }
         };
 
-        setInterval(sendPlayerState, 50);
+        function sendPlayerStateP2P() {
+            if (!player || p2pMode !== 'connected') return;
+            const state = {
+                x: player.x, y: player.y,
+                vx: player.velocityX, vy: player.velocityY,
+                fr: player.facingRight,
+                atk: player.isAttacking, def: player.isDeflecting,
+                jmp: player.isJumping, hp: player.health,
+                anim: player.currentAnimation, fi: player.frameIndex
+            };
+            const msg = JSON.stringify(state);
+            dataChannels.forEach(dc => {
+                if (dc.readyState === 'open') dc.send(msg);
+            });
+        }
+
+        function handleRemoteState(msg, peerId) {
+            if (!otherPlayers.has(peerId)) {
+                otherPlayers.set(peerId, new Player(canvas.width / 2, canvas.height / 2));
+            }
+            const p = otherPlayers.get(peerId);
+            if (msg.x !== undefined) p.x = msg.x;
+            if (msg.y !== undefined) p.y = msg.y;
+            if (msg.vx !== undefined) p.velocityX = msg.vx;
+            if (msg.vy !== undefined) p.velocityY = msg.vy;
+            if (msg.fr !== undefined) p.facingRight = msg.fr;
+            if (msg.atk !== undefined) p.isAttacking = msg.atk;
+            if (msg.def !== undefined) p.isDeflecting = msg.def;
+            if (msg.jmp !== undefined) p.isJumping = msg.jmp;
+            if (msg.hp !== undefined) p.health = msg.hp;
+            if (msg.anim !== undefined) p.currentAnimation = msg.anim;
+            if (msg.fi !== undefined) p.frameIndex = msg.fi;
+        }
 
         const GRAVITY = 0.5;
         const JUMP_FORCE = -12;
@@ -275,16 +403,42 @@
         });
         window.addEventListener('keyup', (e) => { keys[e.key] = false; });
 
-        function gameLoop() {
-            renderer.begin();
+        let tickAccumulator = 0;
+        let lastFrameTime = performance.now();
 
+        function gameLoop(now) {
+            const frameDelta = now - lastFrameTime;
+            lastFrameTime = now;
+            tickAccumulator += frameDelta;
+
+            let ticked = false;
+            while (tickAccumulator >= TICK_INTERVAL_MS) {
+                tick();
+                tickAccumulator -= TICK_INTERVAL_MS;
+                ticked = true;
+                tickCount++;
+            }
+
+            const elapsed = now - lastFpsTime;
+            if (elapsed >= 1000) {
+                fps = Math.round(tickCount * 1000 / elapsed);
+                tickrate = Math.round(1000 / (now - lastTickTime + 1));
+                tickCount = 0;
+                lastFpsTime = now;
+            }
+
+            render(now);
+            requestAnimationFrame(gameLoop);
+        }
+
+        function tick() {
             if (keys['a'] || keys['A']) player.velocityX = -MOVE_SPEED;
             else if (keys['d'] || keys['D']) player.velocityX = MOVE_SPEED;
             else player.velocityX = 0;
 
             player.update();
 
-            otherPlayers.forEach((other, id) => {
+            otherPlayers.forEach((other) => {
                 other.update();
 
                 if (player.isAttacking) {
@@ -304,6 +458,13 @@
                 }
             });
 
+            sendPlayerStateP2P();
+            lastTickTime = performance.now();
+        }
+
+        function render(now) {
+            renderer.begin();
+
             renderer.fillRect(0, canvas.height - PLATFORM_HEIGHT, canvas.width, PLATFORM_HEIGHT, 0.53, 0.53, 0.53, 1);
 
             otherPlayers.forEach(other => other.draw());
@@ -318,16 +479,15 @@
             otherPlayers.forEach((other, id) => {
                 renderer.fillText(`Player ${id}`, other.x + other.width / 2, other.y - 15, '14px Arial', '#fff', 'center');
             });
-            renderer.fillText(`Status: ${connectionStatus}`, 10, 50, '14px Arial',
-                connectionStatus === 'connected' ? '#0f0' : '#f00');
 
+            const statusColor = connectionStatus === 'connected' ? '#0f0' : '#f00';
+            renderer.fillText(`P2P: ${p2pMode} | Tick: ${TICK_RATE}Hz`, 10, 50, '14px Arial', statusColor);
+            renderer.fillText(`Peers: ${dataChannels.size} | FPS: ${fps}`, 10, 70, '14px Arial', '#aaa');
             renderer.fillText(`Draw calls: ${renderer.drawCalls}`, 10, canvas.height - 30, '12px Arial', '#aaa');
-
-            requestAnimationFrame(gameLoop);
         }
 
         loadAllSprites().then(() => {
-            gameLoop();
+            requestAnimationFrame(gameLoop);
         });
     </script>
 </body>
