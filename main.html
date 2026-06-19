@@ -30,11 +30,30 @@
             border-radius: 8px;
             font-size: 14px;
         }
+        #p2pLog {
+            position: absolute;
+            bottom: 8px;
+            right: 8px;
+            width: 320px;
+            max-height: 140px;
+            overflow-y: auto;
+            background: rgba(0,0,0,0.7);
+            border-radius: 6px;
+            padding: 6px 8px;
+            font-family: monospace;
+            font-size: 12px;
+            pointer-events: none;
+            z-index: 10;
+        }
+        #p2pLog div { color: #0f0; line-height: 1.5; }
+        #p2pLog div.error { color: #f55; }
+        #p2pLog div.info  { color: #8cf; }
     </style>
 </head>
 <body>
     <div id="gameContainer">
         <canvas id="gameCanvas" width="800" height="600"></canvas>
+        <div id="p2pLog"></div>
     </div>
     <div id="gameStatus">Connecting to server...</div>
     <script src="webgl-renderer.js"></script>
@@ -59,6 +78,16 @@
         let lastTickTime = performance.now();
         let p2pMode = 'waiting';
 
+        const logEl = document.getElementById('p2pLog');
+        function p2pLog(msg, cls) {
+            const d = document.createElement('div');
+            if (cls) d.className = cls;
+            d.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            logEl.appendChild(d);
+            logEl.scrollTop = logEl.scrollHeight;
+            if (logEl.children.length > 20) logEl.removeChild(logEl.firstChild);
+        }
+
         const ICE_SERVERS = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
         function createPeerConnection(peerId) {
@@ -80,7 +109,9 @@
             };
 
             pc.onconnectionstatechange = () => {
+                p2pLog(`PC state [Peer ${peerId}]: ${pc.connectionState}`);
                 if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+                    p2pLog(`P2P lost to Player ${peerId}`, 'error');
                     cleanupPeer(peerId);
                 }
             };
@@ -96,12 +127,17 @@
             dc.onopen = () => {
                 dataChannels.set(peerId, dc);
                 p2pMode = 'connected';
+                p2pLog(`P2P connected to Player ${peerId} (${dc.readyState})`);
                 document.getElementById('gameStatus').textContent =
                     `Player ${playerId} [P2P ${TICK_RATE}Hz]`;
             };
             dc.onclose = () => {
+                p2pLog(`P2P channel to Player ${peerId} closed`, 'info');
                 dataChannels.delete(peerId);
                 if (dataChannels.size === 0) p2pMode = 'waiting';
+            };
+            dc.onerror = (e) => {
+                p2pLog(`P2P error with Player ${peerId}`, 'error');
             };
             dc.onmessage = (event) => {
                 try {
@@ -115,6 +151,7 @@
             const pc = createPeerConnection(peerId);
             const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
+            p2pLog(`SDP offer created for Player ${peerId}`);
             socket.send(JSON.stringify({
                 type: 'offer',
                 targetId: peerId,
@@ -128,6 +165,7 @@
             await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
+            p2pLog(`SDP answer sent to Player ${data.playerId}`);
             socket.send(JSON.stringify({
                 type: 'answer',
                 targetId: data.playerId,
@@ -137,7 +175,10 @@
 
         async function handleAnswer(data) {
             const pc = peerConnections.get(data.playerId);
-            if (pc) await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+            if (pc) {
+                await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+                p2pLog(`SDP answer applied for Player ${data.playerId}`);
+            }
         }
 
         async function handleIceCandidate(data) {
@@ -148,6 +189,7 @@
         }
 
         function cleanupPeer(peerId) {
+            p2pLog(`Cleaning up peer ${peerId}`, 'info');
             const dc = dataChannels.get(peerId);
             if (dc) dc.close();
             dataChannels.delete(peerId);
@@ -159,15 +201,18 @@
 
         socket.onopen = () => {
             connectionStatus = 'connected';
+            p2pLog('WebSocket connected to server', 'info');
         };
         socket.onclose = () => {
             connectionStatus = 'disconnected';
             p2pMode = 'disconnected';
+            p2pLog('WebSocket disconnected', 'error');
             document.getElementById('gameStatus').textContent = 'Disconnected from server';
         };
         socket.onerror = () => {
             connectionStatus = 'error';
             p2pMode = 'error';
+            p2pLog('WebSocket error', 'error');
             document.getElementById('gameStatus').textContent = 'Connection error';
         };
 
@@ -175,20 +220,29 @@
             const data = JSON.parse(event.data);
             if (data.type === 'init') {
                 playerId = data.playerId;
+                p2pLog(`Assigned Player ID: ${playerId}`, 'info');
                 document.getElementById('gameStatus').textContent =
                     `Player ${playerId} [P2P connecting...]`;
             } else if (data.type === 'existingPeers') {
-                data.peers.forEach(peerId => createOffer(peerId));
+                p2pLog(`Found ${data.peers.length} existing peer(s): [${data.peers.join(', ')}]`, 'info');
+                data.peers.forEach(peerId => {
+                    p2pLog(`Sending offer to Player ${peerId}...`);
+                    createOffer(peerId);
+                });
             } else if (data.type === 'peerJoined') {
+                p2pLog(`Player ${data.playerId} joined — waiting for their offer`, 'info');
                 document.getElementById('gameStatus').textContent =
                     `Player ${playerId} [P2P handshake with ${data.playerId}...]`;
             } else if (data.type === 'offer') {
+                p2pLog(`Received offer from Player ${data.playerId}`);
                 handleOffer(data);
             } else if (data.type === 'answer') {
+                p2pLog(`Received answer from Player ${data.playerId}`);
                 handleAnswer(data);
             } else if (data.type === 'iceCandidate') {
                 handleIceCandidate(data);
             } else if (data.type === 'peerDisconnected') {
+                p2pLog(`Player ${data.playerId} disconnected`, 'error');
                 cleanupPeer(data.playerId);
                 otherPlayers.delete(data.playerId);
             }
