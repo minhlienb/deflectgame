@@ -77,6 +77,8 @@
         let tickrate = 0;
         let lastTickTime = performance.now();
         let p2pMode = 'waiting';
+        let peerLatencies = new Map();
+        let pingIntervals = new Map();
 
         const logEl = document.getElementById('p2pLog');
         function p2pLog(msg, cls) {
@@ -130,10 +132,12 @@
                 p2pLog(`P2P connected to Player ${peerId} (${dc.readyState})`);
                 document.getElementById('gameStatus').textContent =
                     `Player ${playerId} [P2P ${TICK_RATE}Hz]`;
+                startPing(peerId, dc);
             };
             dc.onclose = () => {
                 p2pLog(`P2P channel to Player ${peerId} closed`, 'info');
                 dataChannels.delete(peerId);
+                stopPing(peerId);
                 if (dataChannels.size === 0) p2pMode = 'waiting';
             };
             dc.onerror = (e) => {
@@ -142,9 +146,35 @@
             dc.onmessage = (event) => {
                 try {
                     const data = JSON.parse(event.data);
-                    handleRemoteState(data, peerId);
+                    if (data._ping) {
+                        dc.send(JSON.stringify({ _pong: data._ping }));
+                    } else if (data._pong) {
+                        const rtt = performance.now() - data._pong;
+                        peerLatencies.set(peerId, rtt);
+                    } else {
+                        handleRemoteState(data, peerId);
+                    }
                 } catch (e) {}
             };
+        }
+
+        function startPing(peerId, dc) {
+            stopPing(peerId);
+            const interval = setInterval(() => {
+                if (dc.readyState === 'open') {
+                    dc.send(JSON.stringify({ _ping: performance.now() }));
+                }
+            }, 1000);
+            pingIntervals.set(peerId, interval);
+        }
+
+        function stopPing(peerId) {
+            const interval = pingIntervals.get(peerId);
+            if (interval) {
+                clearInterval(interval);
+                pingIntervals.delete(peerId);
+            }
+            peerLatencies.delete(peerId);
         }
 
         async function createOffer(peerId) {
@@ -193,6 +223,7 @@
             const dc = dataChannels.get(peerId);
             if (dc) dc.close();
             dataChannels.delete(peerId);
+            stopPing(peerId);
             const pc = peerConnections.get(peerId);
             if (pc) pc.close();
             peerConnections.delete(peerId);
@@ -532,11 +563,20 @@
             }
             otherPlayers.forEach((other, id) => {
                 renderer.fillText(`Player ${id}`, other.x + other.width / 2, other.y - 15, '14px Arial', '#fff', 'center');
+                const lat = peerLatencies.get(id);
+                if (lat !== undefined) {
+                    const latColor = lat < 50 ? '#0f0' : lat < 100 ? '#ff0' : '#f55';
+                    renderer.fillText(`${Math.round(lat)}ms`, other.x + other.width / 2, other.y - 30, '12px Arial', latColor, 'center');
+                }
             });
 
             const statusColor = connectionStatus === 'connected' ? '#0f0' : '#f00';
             renderer.fillText(`P2P: ${p2pMode} | Tick: ${TICK_RATE}Hz`, 10, 50, '14px Arial', statusColor);
-            renderer.fillText(`Peers: ${dataChannels.size} | FPS: ${fps}`, 10, 70, '14px Arial', '#aaa');
+            let latencyLine = `Peers: ${dataChannels.size} | FPS: ${fps}`;
+            let latTexts = [];
+            peerLatencies.forEach((lat, id) => latTexts.push(`P${id}:${Math.round(lat)}ms`));
+            if (latTexts.length > 0) latencyLine += ' | ' + latTexts.join(' ');
+            renderer.fillText(latencyLine, 10, 70, '14px Arial', '#aaa');
             renderer.fillText(`Draw calls: ${renderer.drawCalls}`, 10, canvas.height - 30, '12px Arial', '#aaa');
         }
 
