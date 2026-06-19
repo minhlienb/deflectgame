@@ -5,9 +5,12 @@ const path = require('path');
 
 // Create HTTP server
 const server = http.createServer((req, res) => {
+    // Parse URL without query string
+    const urlPath = req.url.split('?')[0];
+
     // Get the file path
-    let filePath = path.join(__dirname, req.url === '/' ? 'main.html' : req.url);
-    
+    let filePath = path.join(__dirname, urlPath === '/' ? 'main.html' : urlPath);
+
     // Get the file extension
     const extname = path.extname(filePath);
     
@@ -27,7 +30,13 @@ const server = http.createServer((req, res) => {
             contentType = 'image/png';
             break;
         case '.jpg':
-            contentType = 'image/jpg';
+            contentType = 'image/jpeg';
+            break;
+        case '.svg':
+            contentType = 'image/svg+xml';
+            break;
+        case '.woff2':
+            contentType = 'font/woff2';
             break;
     }
     
@@ -61,8 +70,9 @@ const clients = new Map();
 let nextPlayerId = 1;
 
 // Start the server
-server.listen(3000, () => {
-    console.log('Server running on port 3000');
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on port ${PORT}`);
 });
 
 wss.on('connection', (ws) => {
